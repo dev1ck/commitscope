@@ -45,6 +45,14 @@ export interface ApiResult<T = unknown> {
   nextPage?: number
 }
 
+export type UpdateStatus =
+  | { state: 'idle' }
+  /** manual: portable 실행이라 자동 설치 대신 다운로드 페이지를 연다 */
+  | { state: 'available'; version: string; manual?: boolean }
+  | { state: 'downloading'; version: string; percent: number }
+  | { state: 'downloaded'; version: string }
+  | { state: 'error'; version: string; message: string }
+
 export interface Api {
   getConfig(): Promise<AppConfig>
   saveHost(host: HostInput): Promise<AppConfig>
@@ -56,4 +64,10 @@ export interface Api {
   saveCsv(defaultName: string, content: string): Promise<boolean>
   openExternal(url: string): Promise<void>
   notify(title: string, body: string): void
+  getVersion(): Promise<string>
+  getUpdateStatus(): Promise<UpdateStatus>
+  /** 새 버전을 받아 설치 후 재시작 (portable은 다운로드 페이지 열기) */
+  installUpdate(): Promise<void>
+  /** 상태 변화 구독. 반환 함수로 해제 */
+  onUpdateStatus(cb: (s: UpdateStatus) => void): () => void
 }

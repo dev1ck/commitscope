@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar'
 import { HostsDialog } from './components/HostsDialog'
 import { AddProjectDialog } from './components/AddProjectDialog'
 import { ProjectView, type Jump } from './components/ProjectView'
+import { UpdateBanner } from './components/UpdateBanner'
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null)
@@ -68,7 +69,8 @@ export default function App() {
           </div>
         )}
       </main>
-      {dialog === 'hosts' && <HostsDialog config={config} onChange={setConfig} onClose={() => setDialog(null)} />}
+      <UpdateBanner />
+      {dialog === 'hosts' &&<HostsDialog config={config} onChange={setConfig} onClose={() => setDialog(null)} />}
       {dialog === 'addProject' && (
         <AddProjectDialog
           config={config}

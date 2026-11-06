@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import type { ApiResult, AppConfig, HostInput, ProjectConfig, Query, Settings } from '../shared/types'
+import { setupUpdater } from './updater'
 
 interface StoredHost {
   id: string
@@ -184,6 +185,7 @@ app.setAppUserModelId('local.commitscope')
 app.whenReady().then(() => {
   registerIpc()
   createWindow()
+  setupUpdater()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

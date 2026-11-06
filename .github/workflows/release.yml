@@ -1,0 +1,39 @@
+# v* 태그를 push하면 Windows 설치 파일을 빌드해 이 저장소의 Releases에 올린다.
+# 앱은 이 저장소의 최신 릴리스를 보고 자동 업데이트한다.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 태그와 package.json 버전 일치 확인
+        shell: bash
+        run: |
+          v="v$(node -p "require('./package.json').version")"
+          if [ "$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::태그($GITHUB_REF_NAME)와 package.json 버전($v)이 다릅니다. npm version으로 올린 뒤 태그를 push하세요."
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+
+      - name: 빌드 및 릴리스 업로드
+        run: npx electron-vite build && npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,7 +1,7 @@
 {
   "name": "commitscope",
   "productName": "Commitscope",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GitLab commit log viewer",
   "main": "./out/main/index.js",
   "private": true,
@@ -10,7 +10,7 @@
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/renderer/src/lib/*.test.mts",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win --publish never"
   },
   "build": {
     "appId": "local.commitscope",
@@ -29,8 +29,29 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    }
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "installerLanguages": [
+        "ko_KR"
+      ],
+      "language": "1042",
+      "include": "build/installer.nsh",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "dev1ck",
+        "repo": "commitscope",
+        "releaseType": "release"
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
@@ -44,6 +65,7 @@
     "vite": "^8.3.6"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   }

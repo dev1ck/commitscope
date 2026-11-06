@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { AppConfig } from '../../../shared/types'
 
 interface Props {
@@ -10,12 +11,19 @@ interface Props {
 }
 
 export function Sidebar({ config, activeKey, onSelect, onRemove, onAdd, onHosts }: Props) {
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    window.api.getVersion().then(setVersion)
+  }, [])
   const multiHost = config.hosts.length > 1
   const hostName = (id: string) => config.hosts.find((h) => h.id === id)?.name ?? '?'
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-head">Commitscope</div>
+      <div className="sidebar-head">
+        Commitscope
+        {version && <span className="app-version">v{version}</span>}
+      </div>
       <div className="project-list">
         {config.projects.map((p) => (
           <div
