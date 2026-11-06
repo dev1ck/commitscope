@@ -91,3 +91,24 @@ export function computeGraph(commits: GraphCommit[]): GraphLayout {
 
   return { rows, width }
 }
+
+/**
+ * 한 페이지 안의 커밋 순서를 최신 → 과거로 맞춘다.
+ * GitLab은 all=true 조회 시 페이지 단위로 뒤집힌(과거 → 최신) 순서로 돌려준다.
+ * 부모가 자식보다 위에 있는 쌍이 더 많으면 뒤집힌 것으로 본다.
+ */
+export function fixPageOrder<T extends GraphCommit & { committed_date: string }>(page: T[]): T[] {
+  const pos = new Map(page.map((c, i) => [c.id, i]))
+  let up = 0, down = 0
+  page.forEach((c, i) => {
+    for (const p of c.parent_ids) {
+      const j = pos.get(p)
+      if (j === undefined) continue
+      if (j < i) up++
+      else down++
+    }
+  })
+  // 경로 필터 등으로 부모-자식 쌍이 없으면 날짜로 판단
+  const reversed = up || down ? up > down : page.length > 1 && Date.parse(page[0].committed_date) < Date.parse(page[page.length - 1].committed_date)
+  return reversed ? [...page].reverse() : page
+}

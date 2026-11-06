@@ -14,6 +14,11 @@ export function dayOffset(days: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
+/** `git cherry-pick -x`가 메시지에 남긴 "(cherry picked from commit <sha>)"의 원본 SHA들 */
+export function cherryPickSources(message: string): string[] {
+  return [...message.matchAll(/\(cherry picked from commit ([0-9a-f]{7,40})\)/g)].map((m) => m[1])
+}
+
 export function appendUnique(prev: Commit[], add: Commit[]): Commit[] {
   const have = new Set(prev.map((c) => c.id))
   return [...prev, ...add.filter((c) => !have.has(c.id))]

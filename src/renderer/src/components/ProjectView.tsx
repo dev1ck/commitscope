@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProjectConfig, Settings } from '../../../shared/types'
-import { ApiError, getCommit, listCommits, listRefs, matchesAuthor, type Commit, type CommitQuery, type QueryMode, type RefInfo } from '../lib/gitlab'
+import { ApiError, commitSources, getCommit, listCommits, listRefs, matchesAuthor, type Commit, type CommitQuery, type QueryMode, type RefInfo } from '../lib/gitlab'
 import { computeGraph } from '../lib/graph'
+import { feedHasMore, feedNext, newFeed, type Feed } from '../lib/feed'
 import { appendUnique, commitsToCsv, dayOffset } from '../lib/util'
 import { CommitList } from './CommitList'
 import { CommitDetail } from './CommitDetail'
+import { RefCombo } from './RefCombo'
 
 export interface Jump {
   key: string
@@ -24,12 +26,12 @@ interface Props {
 const LOAD_ALL_LIMIT = 5000
 
 export function ProjectView({ project, allProjects, settings, onSettings, jump, onJump }: Props) {
-  const initial: CommitQuery = { mode: 'ref', ref: project.defaultBranch, from: '', to: '', since: '', until: '', author: '', path: '' }
+  const initial: CommitQuery = { mode: 'ref', refs: [project.defaultBranch], from: '', to: '', since: '', until: '', author: '', path: '' }
   const [draft, setDraft] = useState<CommitQuery>(initial)
   const [query, setQuery] = useState<CommitQuery>(initial)
   const [refs, setRefs] = useState<RefInfo[]>([])
   const [commits, setCommits] = useState<Commit[]>([])
-  const [nextPage, setNextPage] = useState<number | undefined>()
+  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -42,8 +44,9 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
 
   const gen = useRef(0)
   const busy = useRef(false)
-  const state = useRef({ commits, query, nextPage })
-  state.current = { commits, query, nextPage }
+  const feed = useRef<Feed<Commit>>(newFeed(0))
+  const state = useRef({ commits, query })
+  state.current = { commits, query }
 
   const flash = (msg: string) => {
     setNotice(msg)
@@ -56,24 +59,31 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
       .catch((e) => setError(`브랜치/태그 조회 실패: ${(e as Error).message}`))
   }, [project])
 
+  /** 현재 조회 조건의 다음 묶음. 여러 브랜치를 골랐으면 브랜치별로 받아 날짜순으로 병합한다 */
+  const fetchNext = (f: Feed<Commit>, q: CommitQuery) => {
+    const sources = commitSources(q)
+    return feedNext(f, (i, page) => listCommits(project, sources[i], page))
+  }
+
   /** 조건을 바꿔 첫 페이지부터 다시 조회 */
   const runQuery = useCallback(
     async (q: CommitQuery) => {
       const g = ++gen.current
       busy.current = true
+      const f = (feed.current = newFeed<Commit>(commitSources(q).length))
       setQuery(q)
       setLoading(true)
       setError('')
       setNewShas(new Set())
       try {
-        const r = await listCommits(project, q, 1)
+        const data = await fetchNext(f, q)
         if (g !== gen.current) return
-        setCommits(r.data)
-        setNextPage(r.nextPage)
+        setCommits(data)
+        setHasMore(feedHasMore(f))
       } catch (e) {
         if (g !== gen.current) return
         setCommits([])
-        setNextPage(undefined)
+        setHasMore(false)
         setError((e as Error).message)
       } finally {
         if (g === gen.current) {
@@ -88,21 +98,20 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   /** 다음 페이지들을 이어서 불러온다. all=true면 끝까지(최대 LOAD_ALL_LIMIT) */
   const loadMore = useCallback(
     async (all = false) => {
-      if (busy.current || !state.current.nextPage) return
+      const f = feed.current
+      if (busy.current || !feedHasMore(f)) return
       const g = gen.current
       busy.current = true
       setLoading(true)
       let acc = state.current.commits
-      let page: number | undefined = state.current.nextPage
       try {
         do {
-          const r = await listCommits(project, state.current.query, page!)
+          const data = await fetchNext(f, state.current.query)
           if (g !== gen.current) return
-          acc = appendUnique(acc, r.data)
-          page = r.nextPage
+          acc = appendUnique(acc, data)
           setCommits(acc)
-          setNextPage(page)
-        } while (all && page && acc.length < LOAD_ALL_LIMIT)
+          setHasMore(feedHasMore(f))
+        } while (all && feedHasMore(f) && acc.length < LOAD_ALL_LIMIT)
       } catch (e) {
         if (g === gen.current) setError((e as Error).message)
       } finally {
@@ -131,11 +140,14 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
       if (busy.current) return
       const g = gen.current
       try {
-        const r = await listCommits(project, state.current.query, 1)
+        const sources = commitSources(state.current.query)
+        const pages = await Promise.all(sources.map((s) => listCommits(project, s, 1)))
         if (g !== gen.current) return
         const have = new Set(state.current.commits.map((c) => c.id))
-        const fresh = r.data.filter((c) => !have.has(c.id))
+        const fresh = appendUnique([], pages.flatMap((r) => r.data)).filter((c) => !have.has(c.id))
         if (!fresh.length) return
+        if (sources.length > 1) fresh.sort((a, b) => Date.parse(b.committed_date) - Date.parse(a.committed_date))
+        for (const c of fresh) feed.current.seen.add(c.id)
         setCommits((prev) => [...fresh.filter((c) => !prev.some((p) => p.id === c.id)), ...prev])
         setNewShas((s) => new Set([...s, ...fresh.map((c) => c.id)]))
         reloadRefs()
@@ -149,8 +161,8 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
     return () => clearInterval(timer)
   }, [settings.autoRefreshSec, project, reloadRefs])
 
-  const lookupSha = async () => {
-    const sha = shaInput.trim()
+  const lookupSha = async (raw: string) => {
+    const sha = raw.trim()
     if (!sha) return
     setError('')
     try {
@@ -206,7 +218,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   const rows = useMemo(() => (hideMode ? base.filter(matches) : base), [hideMode, base, matches])
   // 작성자/경로로 걸러진 결과는 부모 커밋이 빠져 있어 그래프가 의미 없으므로 그리지 않는다
   const graphable = !hideMode && !query.author.trim() && !query.path.trim()
-  const graph = useMemo(() => (graphable ? computeGraph(base) : null), [graphable, base])
+  const noGraphReason = hideMode ? '일치하지 않는 커밋을 숨기는 중이라' : !graphable ? '작성자/경로 조건으로 일부 커밋만 받아서' : ''
   const matchCount = useMemo(() => (filterActive ? base.filter(matches).length : base.length), [filterActive, base, matches])
 
   const refsBySha = useMemo(() => {
@@ -214,6 +226,8 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
     for (const r of refs) m.set(r.sha, [...(m.get(r.sha) ?? []), r])
     return m
   }, [refs])
+
+  const graph = useMemo(() => (graphable ? computeGraph(base) : null), [graphable, base])
 
   const setD = (patch: Partial<CommitQuery>) => setDraft((d) => ({ ...d, ...patch }))
   const apply = () => {
@@ -231,49 +245,59 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
     if (await window.api.saveCsv(name, commitsToCsv(list))) flash(`${list.length}개 커밋을 CSV로 저장했습니다.`)
   }
 
-  const branchNames = refs.filter((r) => r.type === 'branch')
-  const tagNames = refs.filter((r) => r.type === 'tag')
-
-  const modes: [QueryMode, string][] = [
-    ['ref', '브랜치/태그'],
-    ['range', '범위 비교'],
-    ['all', '전체 브랜치']
+  const modes: [QueryMode, string, string][] = [
+    ['ref', '브랜치/태그', '고른 브랜치·태그의 히스토리 (여러 개 선택 가능)'],
+    ['range', '범위 비교', '기준 이후 대상에 추가된 커밋 (예: 지난 릴리스 태그 이후 main에 들어간 커밋)'],
+    ['all', '전체 브랜치', '모든 브랜치·태그의 커밋']
   ]
+  // 조건을 바꾸고 아직 조회하지 않았으면 조회 버튼으로 알려준다
+  const dirty = JSON.stringify(draft) !== JSON.stringify(query)
 
   return (
     <div className="project-view">
       <div className="filters">
         <div className="toolbar-row">
           <div className="segmented">
-            {modes.map(([m, label]) => (
-              <button key={m} className={draft.mode === m ? 'on' : ''} onClick={() => setD({ mode: m })}>
+            {modes.map(([m, label, help]) => (
+              <button
+                key={m}
+                className={draft.mode === m ? 'on' : ''}
+                title={help}
+                onClick={() => {
+                  setD({ mode: m })
+                  // 전체 브랜치는 더 입력할 것이 없으므로 바로 조회한다
+                  if (m === 'all') runQuery({ ...draft, mode: m })
+                }}
+              >
                 {label}
               </button>
             ))}
           </div>
           {draft.mode === 'ref' && (
-            <input list="refs" className="ref-input" value={draft.ref} placeholder={project.defaultBranch} onChange={(e) => setD({ ref: e.target.value })} onKeyDown={onEnter} />
+            <RefCombo
+              refs={refs}
+              values={draft.refs}
+              multiple
+              placeholder={`브랜치/태그 선택 (비우면 ${project.defaultBranch})`}
+              onChange={(v) => setD({ refs: v })}
+              onEnter={apply}
+            />
           )}
           {draft.mode === 'range' && (
             <>
-              <input list="refs" className="ref-input" value={draft.from} placeholder="기준 (예: v1.2.0 태그)" onChange={(e) => setD({ from: e.target.value })} onKeyDown={onEnter} title="여기에 없는 커밋만 표시" />
+              <RefCombo refs={refs} values={[draft.from]} placeholder="기준 (예: v1.0.0)" onChange={(v) => setD({ from: v[0] ?? '' })} onEnter={apply} />
               <button className="icon" title="기준/대상 바꾸기" onClick={() => setD({ from: draft.to, to: draft.from })}>
                 ⇄
               </button>
-              <input list="refs" className="ref-input" value={draft.to} placeholder="대상 (예: develop 브랜치)" onChange={(e) => setD({ to: e.target.value })} onKeyDown={onEnter} />
+              <RefCombo refs={refs} values={[draft.to]} placeholder={`대상 (예: ${project.defaultBranch})`} onChange={(v) => setD({ to: v[0] ?? '' })} onEnter={apply} />
+              <span className="muted small" title="git log 기준..대상 — 기준에는 없고 대상에만 있는 커밋">
+                기준 이후 대상에 추가된 커밋
+              </span>
             </>
           )}
-          {draft.mode === 'all' && <span className="muted small">모든 원격 브랜치의 커밋</span>}
-          <datalist id="refs">
-            {branchNames.map((r) => (
-              <option key={'b' + r.name} value={r.name} label={r.isDefault ? '브랜치 (기본)' : '브랜치'} />
-            ))}
-            {tagNames.map((r) => (
-              <option key={'t' + r.name} value={r.name} label="태그" />
-            ))}
-          </datalist>
-          <input className="path-input" value={draft.path} placeholder="파일/디렉터리 경로" onChange={(e) => setD({ path: e.target.value })} onKeyDown={onEnter} />
-          <button className="primary" onClick={apply}>
+          {draft.mode === 'all' && <span className="muted small">모든 브랜치·태그의 커밋</span>}
+          <input className="path-input" value={draft.path} placeholder="파일/폴더 경로 (예: src/)" title="이 경로를 변경한 커밋만 조회합니다" onChange={(e) => setD({ path: e.target.value })} onKeyDown={onEnter} />
+          <button className={'primary' + (dirty ? ' dirty' : '')} onClick={apply} title={dirty ? '조건이 바뀌었습니다. 눌러서 적용하세요' : undefined}>
             조회
           </button>
           <button onClick={() => (reloadRefs(), runQuery(query))} title="현재 조건으로 다시 조회">
@@ -285,7 +309,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
             value={shaInput}
             placeholder="커밋 SHA로 찾기"
             onChange={(e) => setShaInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && lookupSha()}
+            onKeyDown={(e) => e.key === 'Enter' && lookupSha(shaInput)}
           />
         </div>
 
@@ -304,7 +328,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
             30일
           </button>
           <button className="small-btn" onClick={() => setD({ since: '', until: '' })}>
-            기간 해제
+            전체 기간
           </button>
           <span className="label">작성자</span>
           <input className="author-input" value={draft.author} placeholder="이름 또는 이메일" onChange={(e) => setD({ author: e.target.value })} onKeyDown={onEnter} />
@@ -348,11 +372,16 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
             일치하지 않는 커밋 숨기기
           </label>
           <span className="spacer" />
-          <span className="muted small">
-            {base.length.toLocaleString()}개 로드{filterActive && ` · ${matchCount.toLocaleString()}개 일치`}
-            {nextPage ? ' · 더 있음' : ' · 끝'}
+          {noGraphReason && base.length > 0 && (
+            <span className="muted small" title={`${noGraphReason} 커밋 사이의 연결을 알 수 없어 그래프를 표시하지 않습니다.`}>
+              그래프 숨김 ⓘ
+            </span>
+          )}
+          <span className="muted small" title={hasMore ? '목록 끝까지 스크롤하면 이어서 불러옵니다' : undefined}>
+            {base.length.toLocaleString()}개{filterActive && ` 중 ${matchCount.toLocaleString()}개 일치`}
+            {hasMore ? ' · 더 있음' : ' · 전부 불러옴'}
           </span>
-          <button className="small-btn" disabled={!nextPage || loading} onClick={() => loadMore(true)} title={`최대 ${LOAD_ALL_LIMIT.toLocaleString()}개까지`}>
+          <button className="small-btn" disabled={!hasMore || loading} onClick={() => loadMore(true)} title={`최대 ${LOAD_ALL_LIMIT.toLocaleString()}개까지`}>
             모두 불러오기
           </button>
           <button className="small-btn" disabled={!base.length} onClick={exportCsv}>
@@ -380,12 +409,22 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
           selected={selected}
           newShas={newShas}
           loading={loading}
-          hasMore={!!nextPage}
+          hasMore={hasMore}
           onSelect={setSelected}
           onLoadMore={() => loadMore()}
           onOpen={(c) => window.api.openExternal(c.web_url)}
         />
-        {selected && <CommitDetail project={project} sha={selected} onSelect={setSelected} onClose={() => setSelected(null)} onFlash={flash} />}
+        {selected && (
+          <CommitDetail
+            project={project}
+            sha={selected}
+            loaded={commits}
+            onSelect={setSelected}
+            onLookup={lookupSha}
+            onClose={() => setSelected(null)}
+            onFlash={flash}
+          />
+        )}
       </div>
     </div>
   )

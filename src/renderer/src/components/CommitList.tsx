@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Commit, RefInfo } from '../lib/gitlab'
 import type { GraphLayout } from '../lib/graph'
-import { fmtDate } from '../lib/util'
+import { cherryPickSources, fmtDate } from '../lib/util'
 
 interface Props {
   commits: Commit[]
@@ -22,7 +22,8 @@ const ROW = 26
 const LANE = 14
 const MAX_LANES = 24
 const PALETTE = ['#4c8dff', '#e5534b', '#57ab5a', '#c69026', '#b083f0', '#39c5cf', '#e275ad', '#d4743a']
-const laneX = (k: number) => LANE / 2 + 4 + k * LANE
+const laneX = (k: number) => LANE / 2 + 4 + Math.min(k, MAX_LANES - 1) * LANE
+const laneColor =(color: number) => PALETTE[color % PALETTE.length]
 
 export function CommitList(p: Props) {
   const scroller = useRef<HTMLDivElement>(null)
@@ -75,13 +76,14 @@ export function CommitList(p: Props) {
       if (!r) continue
       r.edges.forEach((e, k) => {
         if (e.from >= MAX_LANES && e.to >= MAX_LANES) return
-        const x1 = laneX(Math.min(e.from, MAX_LANES)), x2 = laneX(Math.min(e.to, MAX_LANES))
+        const x1 = laneX(e.from), x2 = laneX(e.to)
         const y1 = y(i), y2 = y(i + 1)
         const d = x1 === x2 ? `M${x1} ${y1}V${y2}` : `M${x1} ${y1}C${x1} ${y1 + ROW * 0.6} ${x2} ${y2 - ROW * 0.6} ${x2} ${y2}`
-        paths.push(<path key={`${i}-${k}`} d={d} stroke={PALETTE[e.color % PALETTE.length]} />)
+        paths.push(<path key={`${i}-${k}`} d={d} stroke={laneColor(e.color)} />)
       })
-      if (i >= start && r.col < MAX_LANES) {
-        const color = PALETTE[r.color % PALETTE.length]
+      // lane이 너무 많으면 마지막 칸에 겹쳐 그리되, 점은 모든 커밋에 그린다
+      if (i >= start) {
+        const color = laneColor(r.color)
         nodes.push(
           <circle
             key={'n' + i}
@@ -119,6 +121,7 @@ export function CommitList(p: Props) {
           {p.commits.slice(start, end).map((c, k) => {
             const i = start + k
             const refs = p.refsBySha.get(c.id)
+            const picks = cherryPickSources(c.message)
             const cls = ['row', c.id === p.selected && 'selected', p.dim?.(c) && 'dim', p.newShas.has(c.id) && 'new'].filter(Boolean).join(' ')
             return (
               <div
@@ -140,6 +143,11 @@ export function CommitList(p: Props) {
                   {refs && refs.length > 3 && (
                     <span className="badge" title={refs.slice(3).map((r) => r.name).join('\n')}>
                       +{refs.length - 3}
+                    </span>
+                  )}
+                  {picks.length > 0 && (
+                    <span className="badge pick" title={`원본 커밋: ${picks.join(', ')}`}>
+                      체리픽
                     </span>
                   )}
                   {c.title}

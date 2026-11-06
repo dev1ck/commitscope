@@ -1,4 +1,5 @@
 import type { ProjectConfig, Query } from '../../../shared/types'
+import { fixPageOrder } from './graph'
 
 export interface Commit {
   id: string
@@ -62,7 +63,8 @@ export type QueryMode = 'all' | 'ref' | 'range'
 
 export interface CommitQuery {
   mode: QueryMode
-  ref: string
+  /** ref 모드에서 조회할 브랜치/태그. 비어 있으면 기본 브랜치, 여러 개면 각각 조회해 병합 */
+  refs: string[]
   from: string
   to: string
   /** YYYY-MM-DD */
@@ -105,7 +107,7 @@ export const PAGE_SIZE = 100
 export function commitParams(q: CommitQuery): Query {
   const params: Query = { per_page: PAGE_SIZE, order: 'topo' }
   if (q.mode === 'all') params.all = true
-  else if (q.mode === 'ref') params.ref_name = q.ref || undefined
+  else if (q.mode === 'ref') params.ref_name = q.refs[0] || undefined
   else params.ref_name = `${q.from}..${q.to}`
   if (q.since) params.since = new Date(`${q.since}T00:00:00`).toISOString()
   if (q.until) params.until = new Date(`${q.until}T23:59:59`).toISOString()
@@ -114,8 +116,12 @@ export function commitParams(q: CommitQuery): Query {
   return params
 }
 
+/** 한 번의 API 호출로 받을 수 있는 조회 단위들. 여러 ref를 고르면 ref마다 하나씩 */
+export const commitSources = (q: CommitQuery): CommitQuery[] =>
+  q.mode === 'ref' && q.refs.length > 1 ? q.refs.map((r) => ({ ...q, refs: [r] })) : [q]
+
 export const listCommits = (p: ProjectConfig, q: CommitQuery, page: number) =>
-  call<Commit[]>(p.hostId, proj(p, '/repository/commits'), { ...commitParams(q), page })
+  call<Commit[]>(p.hostId, proj(p, '/repository/commits'), { ...commitParams(q), page }).then((r) => ({ ...r, data: fixPageOrder(r.data) }))
 
 export async function listRefs(p: ProjectConfig): Promise<RefInfo[]> {
   type B = { name: string; default: boolean; commit: { id: string } }
