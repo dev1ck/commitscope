@@ -26,7 +26,9 @@ interface Props {
 const LOAD_ALL_LIMIT = 5000
 
 export function ProjectView({ project, allProjects, settings, onSettings, jump, onJump }: Props) {
-  const initial: CommitQuery = { mode: 'ref', refs: [project.defaultBranch], from: '', to: '', since: '', until: '', author: '', path: '' }
+  const initial = useMemo<CommitQuery>(() => ({
+    mode: 'all', refs: [project.defaultBranch], from: '', to: '', since: '', until: '', author: '', path: ''
+  }), [project.defaultBranch])
   const [draft, setDraft] = useState<CommitQuery>(initial)
   const [query, setQuery] = useState<CommitQuery>(initial)
   const [refs, setRefs] = useState<RefInfo[]>([])
@@ -237,6 +239,13 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
     }
     runQuery(draft)
   }
+  const resetFilters = () => {
+    setDraft(initial)
+    setText('')
+    setAuthors([])
+    setHide(false)
+    runQuery(initial)
+  }
   const onEnter = (e: React.KeyboardEvent) => e.key === 'Enter' && apply()
 
   const exportCsv = async () => {
@@ -246,9 +255,9 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   }
 
   const modes: [QueryMode, string, string][] = [
+    ['all', '전체 브랜치', '모든 브랜치·태그의 커밋'],
     ['ref', '브랜치/태그', '고른 브랜치·태그의 히스토리 (여러 개 선택 가능)'],
-    ['range', '범위 비교', '기준 이후 대상에 추가된 커밋 (예: 지난 릴리스 태그 이후 main에 들어간 커밋)'],
-    ['all', '전체 브랜치', '모든 브랜치·태그의 커밋']
+    ['range', '범위 비교', '기준 이후 대상에 추가된 커밋 (예: 지난 릴리스 태그 이후 main에 들어간 커밋)']
   ]
   // 조건을 바꾸고 아직 조회하지 않았으면 조회 버튼으로 알려준다
   const dirty = JSON.stringify(draft) !== JSON.stringify(query)
@@ -299,6 +308,9 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
           <input className="path-input" value={draft.path} placeholder="파일/폴더 경로 (예: src/)" title="이 경로를 변경한 커밋만 조회합니다" onChange={(e) => setD({ path: e.target.value })} onKeyDown={onEnter} />
           <button className={'primary' + (dirty ? ' dirty' : '')} onClick={apply} title={dirty ? '조건이 바뀌었습니다. 눌러서 적용하세요' : undefined}>
             조회
+          </button>
+          <button onClick={resetFilters} title="조회 조건과 결과 내 필터를 초기화하고 전체 브랜치를 조회합니다">
+            필터 초기화
           </button>
           <button onClick={() => (reloadRefs(), runQuery(query))} title="현재 조건으로 다시 조회">
             ⟳

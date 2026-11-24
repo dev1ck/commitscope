@@ -45,8 +45,14 @@ function toPublic(cfg: StoredConfig): AppConfig {
   }
 }
 
-const encryptToken = (token: string): string => safeStorage.encryptString(token).toString('base64')
-const decryptToken = (enc?: string): string => (enc ? safeStorage.decryptString(Buffer.from(enc, 'base64')) : '')
+const encryptToken = async (token: string): Promise<string> => (await safeStorage.encryptStringAsync(token)).toString('base64')
+
+async function decryptToken(enc?: string): Promise<string> {
+  if (!enc) return ''
+  const encrypted = Buffer.from(enc, 'base64')
+  const decrypted = await safeStorage.decryptStringAsync(encrypted)
+  return decrypted.shouldReEncrypt ? (await safeStorage.decryptStringAsync(encrypted)).result : decrypted.result
+}
 
 async function gitlabFetch<T>(baseUrl: string, token: string, path: string, query?: Query): Promise<ApiResult<T>> {
   try {
@@ -80,19 +86,20 @@ function registerIpc(): void {
   ipcMain.handle('config:get', async () => toPublic(await loadConfig()))
 
   ipcMain.handle('host:save', async (_e, input: HostInput) => {
+    const tokenEnc = input.token ? await encryptToken(input.token.trim()) : undefined
     const cfg = await loadConfig()
     const baseUrl = input.baseUrl.trim().replace(/\/+$/, '')
     const existing = input.id ? cfg.hosts.find((h) => h.id === input.id) : undefined
     if (existing) {
       existing.name = input.name.trim()
       existing.baseUrl = baseUrl
-      if (input.token) existing.tokenEnc = encryptToken(input.token.trim())
+      if (tokenEnc) existing.tokenEnc = tokenEnc
     } else {
       cfg.hosts.push({
         id: randomUUID(),
         name: input.name.trim(),
         baseUrl,
-        tokenEnc: input.token ? encryptToken(input.token.trim()) : undefined
+        tokenEnc
       })
     }
     await saveConfig(cfg)
@@ -125,7 +132,7 @@ function registerIpc(): void {
     let t = token.trim()
     if (!t && hostId) {
       const cfg = await loadConfig()
-      t = decryptToken(cfg.hosts.find((h) => h.id === hostId)?.tokenEnc)
+      t = await decryptToken(cfg.hosts.find((h) => h.id === hostId)?.tokenEnc)
     }
     return gitlabFetch(baseUrl, t, '/user')
   })
@@ -134,7 +141,7 @@ function registerIpc(): void {
     const cfg = await loadConfig()
     const host = cfg.hosts.find((h) => h.id === hostId)
     if (!host) return { ok: false, status: 0, error: 'GitLab 서버 설정을 찾을 수 없습니다.' }
-    return gitlabFetch(host.baseUrl, decryptToken(host.tokenEnc), path, query)
+    return gitlabFetch(host.baseUrl, await decryptToken(host.tokenEnc), path, query)
   })
 
   ipcMain.handle('file:saveCsv', async (e, defaultName: string, content: string) => {
@@ -181,6 +188,12 @@ function createWindow(): void {
 }
 
 app.setAppUserModelId('local.commitscope')
+
+if (!app.isPackaged) {
+  // 개발 실행은 설치본과 설정 경로를 공유한다. 디스크 캐시 파일을 동시에 열지 않도록 한다.
+  app.commandLine.appendSwitch('disable-http-cache')
+  app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
+}
 
 app.whenReady().then(() => {
   registerIpc()
