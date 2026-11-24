@@ -5,7 +5,7 @@ export interface HostConfig {
   hasToken: boolean
 }
 
-/** token이 undefined이면 기존 토큰을 유지한다 */
+/** 토큰 입력을 비우면 동일한 서버에서 기존 토큰을 사용한다 */
 export interface HostInput {
   id?: string
   name: string
@@ -55,7 +55,7 @@ export type UpdateStatus =
 
 export interface Api {
   getConfig(): Promise<AppConfig>
-  saveHost(host: HostInput): Promise<AppConfig>
+  saveHost(host: HostInput): Promise<ApiResult<AppConfig>>
   deleteHost(id: string): Promise<AppConfig>
   saveProjects(projects: ProjectConfig[]): Promise<AppConfig>
   saveSettings(settings: Settings): Promise<AppConfig>

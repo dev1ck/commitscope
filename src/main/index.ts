@@ -82,28 +82,121 @@ async function gitlabFetch<T>(baseUrl: string, token: string, path: string, quer
   }
 }
 
+interface GitLabAccount {
+  username: string
+  name: string
+}
+
+type HostError = { ok: false; status: number; error: string }
+type HostCheck = { ok: true; status: number; baseUrl: string; account: GitLabAccount } | HostError
+
+const hostError = (status: number, error: string): HostError => ({ ok: false, status, error })
+
+function readHostAccount(baseUrl: string, status: number, contentType: string, text: string): HostCheck {
+  const wrongUrl = 'GitLab API를 찾을 수 없습니다. 프로젝트 링크를 붙여넣었다면 GitLab 기본 URL을 입력하세요.'
+  const isHtml = /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType) || /^\s*(?:<!doctype html|<html[\s>])/i.test(text)
+  if (status === 404 || isHtml) return hostError(status, wrongUrl)
+  if (status === 401) return hostError(401, 'GitLab 인증에 실패했습니다. 토큰 값과 만료 여부를 확인하세요.')
+  if (status === 403) return hostError(403, 'GitLab API 접근이 거부되었습니다. 토큰의 read_api 권한과 계정 접근 권한을 확인하세요.')
+  if (status < 200 || status >= 300) return hostError(status, `GitLab 서버에서 HTTP ${status} 오류를 반환했습니다.`)
+
+  try {
+    const account = JSON.parse(text) as Partial<GitLabAccount> | null
+    const username = typeof account?.username === 'string' ? account.username.trim() : ''
+    if (!username) return hostError(status, wrongUrl)
+    const name = (typeof account?.name === 'string' && account.name.trim()) || username
+    return { ok: true, status, baseUrl, account: { username, name } }
+  } catch {
+    return hostError(status, wrongUrl)
+  }
+}
+
+function requestHostAccount(baseUrl: string, token: string): Promise<HostCheck> {
+  return new Promise((resolve) => {
+    const request = net.request({ url: `${baseUrl}/api/v4/user`, redirect: 'manual', cache: 'no-store' })
+    request.setHeader('PRIVATE-TOKEN', token)
+    const timeout = setTimeout(() => {
+      finish(hostError(0, 'GitLab 서버 응답 시간이 초과되었습니다. URL과 네트워크 연결을 확인하세요.'))
+      request.abort()
+    }, 10_000)
+    const finish = (result: HostCheck) => {
+      clearTimeout(timeout)
+      resolve(result)
+    }
+    const connectionFailed = () => finish(hostError(0, 'GitLab 서버에 연결할 수 없습니다. URL과 네트워크 연결을 확인하세요.'))
+    request.once('error', connectionFailed)
+    request.once('redirect', (status) => {
+      finish(hostError(status, '다른 주소로 이동했습니다. 브라우저에서 GitLab 기본 URL을 확인해 입력하세요.'))
+    })
+    request.once('response', (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.once('error', connectionFailed)
+      response.once('aborted', connectionFailed)
+      response.once('end', () => {
+        const contentType = String(response.headers['content-type'] ?? '')
+        finish(readHostAccount(baseUrl, response.statusCode, contentType, Buffer.concat(chunks).toString('utf8')))
+      })
+    })
+    request.end()
+  })
+}
+
+async function validateHost(rawUrl: string, token: string, existing?: StoredHost): Promise<HostCheck> {
+  const input = rawUrl.trim()
+  const url = URL.parse(input)
+  if (!/^https?:\/\//i.test(input) || !url || !url.hostname || url.username || url.password || url.search || url.hash) {
+    return hostError(400, 'http:// 또는 https://로 시작하는 GitLab 기본 URL을 입력하세요. 예: https://gitlab.example.com')
+  }
+
+  const baseUrl = url.origin + url.pathname.replace(/\/+$/, '')
+  if (!token && existing?.tokenEnc) {
+    if (URL.parse(existing.baseUrl)?.origin !== url.origin) {
+      return hostError(400, '서버 주소가 변경되었습니다. 새 서버의 Personal Access Token을 입력하세요.')
+    }
+    try {
+      token = await decryptToken(existing.tokenEnc)
+    } catch {
+      return hostError(400, '저장된 토큰을 읽을 수 없습니다. Personal Access Token을 다시 입력하세요.')
+    }
+  }
+  if (!token) return hostError(400, 'Personal Access Token을 입력하세요.')
+
+  return requestHostAccount(baseUrl, token)
+}
+
 function registerIpc(): void {
   ipcMain.handle('config:get', async () => toPublic(await loadConfig()))
 
-  ipcMain.handle('host:save', async (_e, input: HostInput) => {
-    const tokenEnc = input.token ? await encryptToken(input.token.trim()) : undefined
+  ipcMain.handle('host:save', async (_e, input: HostInput): Promise<ApiResult<AppConfig>> => {
+    const name = input.name.trim()
+    if (!name) return hostError(400, '서버 이름을 입력하세요.')
+    const token = input.token?.trim() ?? ''
+    const previous = input.id ? (await loadConfig()).hosts.find((h) => h.id === input.id) : undefined
+    if (input.id && !previous) return hostError(404, '편집할 서버 설정을 찾을 수 없습니다.')
+    const validation = await validateHost(input.baseUrl, token, previous)
+    if (!validation.ok) return validation
+
+    const tokenEnc = token ? await encryptToken(token) : undefined
     const cfg = await loadConfig()
-    const baseUrl = input.baseUrl.trim().replace(/\/+$/, '')
-    const existing = input.id ? cfg.hosts.find((h) => h.id === input.id) : undefined
-    if (existing) {
-      existing.name = input.name.trim()
-      existing.baseUrl = baseUrl
+    if (previous) {
+      const existing = cfg.hosts.find((h) => h.id === previous.id)
+      if (!existing || existing.baseUrl !== previous.baseUrl || existing.tokenEnc !== previous.tokenEnc) {
+        return hostError(409, '연결 확인 중 서버 설정이 변경되었습니다. 서버 설정을 다시 열어 주세요.')
+      }
+      existing.name = name
+      existing.baseUrl = validation.baseUrl
       if (tokenEnc) existing.tokenEnc = tokenEnc
     } else {
       cfg.hosts.push({
         id: randomUUID(),
-        name: input.name.trim(),
-        baseUrl,
+        name,
+        baseUrl: validation.baseUrl,
         tokenEnc
       })
     }
     await saveConfig(cfg)
-    return toPublic(cfg)
+    return { ok: true, status: validation.status, data: toPublic(cfg) }
   })
 
   ipcMain.handle('host:delete', async (_e, id: string) => {
@@ -128,13 +221,10 @@ function registerIpc(): void {
     return toPublic(cfg)
   })
 
-  ipcMain.handle('host:test', async (_e, baseUrl: string, token: string, hostId?: string) => {
-    let t = token.trim()
-    if (!t && hostId) {
-      const cfg = await loadConfig()
-      t = await decryptToken(cfg.hosts.find((h) => h.id === hostId)?.tokenEnc)
-    }
-    return gitlabFetch(baseUrl, t, '/user')
+  ipcMain.handle('host:test', async (_e, baseUrl: string, token: string, hostId?: string): Promise<ApiResult<GitLabAccount>> => {
+    const existing = hostId && !token.trim() ? (await loadConfig()).hosts.find((h) => h.id === hostId) : undefined
+    const validation = await validateHost(baseUrl, token.trim(), existing)
+    return validation.ok ? { ok: true, status: validation.status, data: validation.account } : validation
   })
 
   ipcMain.handle('gitlab:request', async (_e, hostId: string, path: string, query?: Query) => {

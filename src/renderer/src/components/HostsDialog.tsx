@@ -7,27 +7,42 @@ interface Props {
   onClose: () => void
 }
 
-const blank = (): HostInput => ({ name: '', baseUrl: 'https://', token: '' })
+const blank = (): HostInput => ({ name: '', baseUrl: '', token: '' })
 
 export function HostsDialog({ config, onChange, onClose }: Props) {
   const [editing, setEditing] = useState<HostInput | null>(config.hosts.length ? null : blank())
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useState<{ text: string; failed?: boolean } | null>(null)
+  const [pending, setPending] = useState(false)
 
-  const test = async () => {
-    if (!editing) return
-    setStatus('연결 확인 중…')
-    const r = await window.api.testHost(editing.baseUrl, editing.token ?? '', editing.id)
-    setStatus(r.ok && r.data ? `✔ ${r.data.name} (@${r.data.username}) 계정으로 연결됨` : `✖ ${r.error}`)
+  const edit = (host: HostInput | null) => {
+    setEditing(host)
+    setStatus(null)
   }
 
-  const save = async () => {
-    if (!editing || !editing.name.trim() || !/^https?:\/\/.+/.test(editing.baseUrl.trim())) {
-      setStatus('이름과 http(s):// 로 시작하는 URL을 입력하세요.')
-      return
+  const submit = async (action: 'test' | 'save') => {
+    if (!editing || pending) return
+    setPending(true)
+    setStatus({ text: '연결 확인 중…' })
+    const fallback = action === 'test' ? 'GitLab 연결을 확인하지 못했습니다.' : 'GitLab 서버 설정을 저장하지 못했습니다.'
+    try {
+      if (action === 'test') {
+        const result = await window.api.testHost(editing.baseUrl, editing.token ?? '', editing.id)
+        if (result.ok && result.data) setStatus({ text: `✔ ${result.data.name} (@${result.data.username}) 계정으로 연결됨` })
+        else setStatus({ text: result.error ?? fallback, failed: true })
+      } else {
+        const result = await window.api.saveHost(editing)
+        if (result.ok && result.data) {
+          onChange(result.data)
+          edit(null)
+        } else {
+          setStatus({ text: result.error ?? fallback, failed: true })
+        }
+      }
+    } catch {
+      setStatus({ text: fallback, failed: true })
+    } finally {
+      setPending(false)
     }
-    onChange(await window.api.saveHost(editing))
-    setEditing(null)
-    setStatus('')
   }
 
   const remove = async (id: string, name: string) => {
@@ -37,11 +52,11 @@ export function HostsDialog({ config, onChange, onClose }: Props) {
   }
 
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="overlay" onMouseDown={(e) => !pending && e.target === e.currentTarget && onClose()}>
       <div className="dialog">
         <div className="dialog-head">
           <h2>GitLab 서버</h2>
-          <button className="icon" onClick={onClose}>
+          <button className="icon" disabled={pending} onClick={onClose}>
             ×
           </button>
         </div>
@@ -53,10 +68,10 @@ export function HostsDialog({ config, onChange, onClose }: Props) {
               {!h.hasToken && <span className="warn"> · 토큰 없음</span>}
             </div>
             <div className="row-actions">
-              <button onClick={() => (setEditing({ id: h.id, name: h.name, baseUrl: h.baseUrl, token: '' }), setStatus(''))}>
+              <button disabled={pending} onClick={() => edit({ id: h.id, name: h.name, baseUrl: h.baseUrl, token: '' })}>
                 편집
               </button>
-              <button onClick={() => remove(h.id, h.name)}>삭제</button>
+              <button disabled={pending} onClick={() => remove(h.id, h.name)}>삭제</button>
             </div>
           </div>
         ))}
@@ -65,39 +80,43 @@ export function HostsDialog({ config, onChange, onClose }: Props) {
           <div className="form">
             <label>
               이름
-              <input value={editing.name} placeholder="예: 사내 GitLab" onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+              <input disabled={pending} value={editing.name} placeholder="예: 사내 GitLab" onChange={(e) => edit({ ...editing, name: e.target.value })} />
             </label>
             <label>
-              서버 URL
+              GitLab 기본 URL
               <input
+                disabled={pending}
                 value={editing.baseUrl}
                 placeholder="https://gitlab.example.com"
-                onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                aria-describedby="gitlab-url-help"
+                onChange={(e) => edit({ ...editing, baseUrl: e.target.value })}
               />
             </label>
+            <div id="gitlab-url-help" className="muted small">프로젝트는 ‘프로젝트 추가’에서 등록하세요.</div>
             <label>
               Personal Access Token <span className="muted">(read_api 권한이면 충분합니다)</span>
               <input
                 type="password"
+                disabled={pending}
                 value={editing.token}
                 placeholder={editing.id ? '변경하지 않으려면 비워두세요' : 'glpat-...'}
-                onChange={(e) => setEditing({ ...editing, token: e.target.value })}
+                onChange={(e) => edit({ ...editing, token: e.target.value })}
               />
             </label>
             <div className="muted small">토큰은 Windows 사용자 계정 키(DPAPI)로 암호화되어 이 PC에만 저장됩니다.</div>
-            {status && <div className="status-msg">{status}</div>}
+            {status && <div className={status.failed ? 'status-msg warn' : 'status-msg'} role={status.failed ? 'alert' : 'status'}>{status.text}</div>}
             <div className="dialog-actions">
-              <button onClick={test}>연결 테스트</button>
+              <button disabled={pending} onClick={() => submit('test')}>연결 테스트</button>
               <span className="spacer" />
-              {config.hosts.length > 0 && <button onClick={() => (setEditing(null), setStatus(''))}>취소</button>}
-              <button className="primary" onClick={save}>
+              {config.hosts.length > 0 && <button disabled={pending} onClick={() => edit(null)}>취소</button>}
+              <button className="primary" disabled={pending} onClick={() => submit('save')}>
                 저장
               </button>
             </div>
           </div>
         ) : (
           <div className="dialog-actions">
-            <button onClick={() => setEditing(blank())}>+ 서버 추가</button>
+            <button onClick={() => edit(blank())}>+ 서버 추가</button>
             <span className="spacer" />
             <button className="primary" onClick={onClose}>
               닫기
