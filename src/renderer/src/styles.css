@@ -109,22 +109,6 @@ button.primary {
   color: var(--accent-fg);
 }
 
-/* 바뀐 조건이 아직 적용되지 않음 */
-button.primary.dirty {
-  position: relative;
-}
-button.primary.dirty::after {
-  content: '';
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--del);
-  border: 1.5px solid var(--bg);
-}
-
 button.primary:hover:not(:disabled) {
   filter: brightness(1.08);
   background: var(--accent);

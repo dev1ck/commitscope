@@ -24,6 +24,12 @@ interface Props {
 }
 
 const LOAD_ALL_LIMIT = 5000
+const REF_QUERY_DELAY = 300
+const TEXT_QUERY_DELAY = 500
+
+function isQueryReady(q: CommitQuery): boolean {
+  return q.mode !== 'range' || Boolean(q.from.trim() && q.to.trim())
+}
 
 export function ProjectView({ project, allProjects, settings, onSettings, jump, onJump }: Props) {
   const initial = useMemo<CommitQuery>(() => ({
@@ -44,6 +50,10 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   const [newShas, setNewShas] = useState<Set<string>>(new Set())
   const [shaInput, setShaInput] = useState('')
 
+  const draftRef = useRef(initial)
+  const requestedQuery = useRef('')
+  const queryTimer = useRef<number | undefined>(undefined)
+  const composing = useRef(false)
   const gen = useRef(0)
   const busy = useRef(false)
   const feed = useRef<Feed<Commit>>(newFeed(0))
@@ -69,7 +79,20 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
 
   /** 조건을 바꿔 첫 페이지부터 다시 조회 */
   const runQuery = useCallback(
-    async (q: CommitQuery) => {
+    async (draftQuery: CommitQuery, force = false) => {
+      if (!isQueryReady(draftQuery)) return
+      const q: CommitQuery = {
+        ...draftQuery,
+        refs: draftQuery.mode === 'ref' ? draftQuery.refs : [],
+        from: draftQuery.mode === 'range' ? draftQuery.from.trim() : '',
+        to: draftQuery.mode === 'range' ? draftQuery.to.trim() : '',
+        author: draftQuery.author.trim(),
+        path: draftQuery.path.trim()
+      }
+      const key = JSON.stringify(q)
+      if (!force && key === requestedQuery.current) return
+      requestedQuery.current = key
+
       const g = ++gen.current
       busy.current = true
       const f = (feed.current = newFeed<Commit>(commitSources(q).length))
@@ -129,6 +152,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   useEffect(() => {
     reloadRefs()
     runQuery(initial)
+    return () => window.clearTimeout(queryTimer.current)
   }, [])
 
   useEffect(() => {
@@ -139,7 +163,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
   useEffect(() => {
     if (!settings.autoRefreshSec) return
     const timer = setInterval(async () => {
-      if (busy.current) return
+      if (busy.current || composing.current || queryTimer.current !== undefined) return
       const g = gen.current
       try {
         const sources = commitSources(state.current.query)
@@ -231,22 +255,54 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
 
   const graph = useMemo(() => (graphable ? computeGraph(base) : null), [graphable, base])
 
-  const setD = (patch: Partial<CommitQuery>) => setDraft((d) => ({ ...d, ...patch }))
-  const apply = () => {
-    if (draft.mode === 'range' && (!draft.from.trim() || !draft.to.trim())) {
-      setError('범위 비교는 기준(from)과 대상(to)을 모두 입력해야 합니다.')
-      return
+  const cancelScheduledQuery = () => {
+    window.clearTimeout(queryTimer.current)
+    queryTimer.current = undefined
+  }
+  const setD = (patch: Partial<CommitQuery>, delay = 0) => {
+    const next = { ...draftRef.current, ...patch }
+    draftRef.current = next
+    setDraft(next)
+    cancelScheduledQuery()
+    if (composing.current || !isQueryReady(next)) return
+    if (!delay) {
+      void runQuery(next)
+    } else {
+      queryTimer.current = window.setTimeout(() => {
+        queryTimer.current = undefined
+        void runQuery(next)
+      }, delay)
     }
-    runQuery(draft)
+  }
+  const textFilterEvents = (field: 'author' | 'path') => ({
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setD({ [field]: e.target.value }, TEXT_QUERY_DELAY),
+    onCompositionStart: () => {
+      composing.current = true
+      cancelScheduledQuery()
+    },
+    onCompositionEnd: (e: React.CompositionEvent<HTMLInputElement>) => {
+      composing.current = false
+      setD({ [field]: e.currentTarget.value }, TEXT_QUERY_DELAY)
+    },
+    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter' && !e.nativeEvent.isComposing && !composing.current) setD({})
+    }
+  })
+  const refresh = () => {
+    cancelScheduledQuery()
+    reloadRefs()
+    const next = draftRef.current
+    void runQuery(isQueryReady(next) ? next : state.current.query, true)
   }
   const resetFilters = () => {
+    cancelScheduledQuery()
+    draftRef.current = initial
     setDraft(initial)
     setText('')
     setAuthors([])
     setHide(false)
-    runQuery(initial)
+    void runQuery(initial, true)
   }
-  const onEnter = (e: React.KeyboardEvent) => e.key === 'Enter' && apply()
 
   const exportCsv = async () => {
     const list = filterActive ? base.filter(matches) : base
@@ -259,9 +315,6 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
     ['ref', '브랜치/태그', '고른 브랜치·태그의 히스토리 (여러 개 선택 가능)'],
     ['range', '범위 비교', '기준 이후 대상에 추가된 커밋 (예: 지난 릴리스 태그 이후 main에 들어간 커밋)']
   ]
-  // 조건을 바꾸고 아직 조회하지 않았으면 조회 버튼으로 알려준다
-  const dirty = JSON.stringify(draft) !== JSON.stringify(query)
-
   return (
     <div className="project-view">
       <div className="filters">
@@ -272,11 +325,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
                 key={m}
                 className={draft.mode === m ? 'on' : ''}
                 title={help}
-                onClick={() => {
-                  setD({ mode: m })
-                  // 전체 브랜치는 더 입력할 것이 없으므로 바로 조회한다
-                  if (m === 'all') runQuery({ ...draft, mode: m })
-                }}
+                onClick={() => setD({ mode: m })}
               >
                 {label}
               </button>
@@ -288,31 +337,27 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
               values={draft.refs}
               multiple
               placeholder={`브랜치/태그 선택 (비우면 ${project.defaultBranch})`}
-              onChange={(v) => setD({ refs: v })}
-              onEnter={apply}
+              onChange={(v) => setD({ refs: v }, REF_QUERY_DELAY)}
             />
           )}
           {draft.mode === 'range' && (
             <>
-              <RefCombo refs={refs} values={[draft.from]} placeholder="기준 (예: v1.0.0)" onChange={(v) => setD({ from: v[0] ?? '' })} onEnter={apply} />
-              <button className="icon" title="기준/대상 바꾸기" onClick={() => setD({ from: draft.to, to: draft.from })}>
+              <RefCombo refs={refs} values={[draft.from]} placeholder="기준 (예: v1.0.0)" onChange={(v) => setD({ from: v[0] ?? '' })} />
+              <button className="icon" title="기준/대상 바꾸기" onClick={() => setD({ from: draftRef.current.to, to: draftRef.current.from })}>
                 ⇄
               </button>
-              <RefCombo refs={refs} values={[draft.to]} placeholder={`대상 (예: ${project.defaultBranch})`} onChange={(v) => setD({ to: v[0] ?? '' })} onEnter={apply} />
+              <RefCombo refs={refs} values={[draft.to]} placeholder={`대상 (예: ${project.defaultBranch})`} onChange={(v) => setD({ to: v[0] ?? '' })} />
               <span className="muted small" title="git log 기준..대상 — 기준에는 없고 대상에만 있는 커밋">
                 기준 이후 대상에 추가된 커밋
               </span>
             </>
           )}
           {draft.mode === 'all' && <span className="muted small">모든 브랜치·태그의 커밋</span>}
-          <input className="path-input" value={draft.path} placeholder="파일/폴더 경로 (예: src/)" title="이 경로를 변경한 커밋만 조회합니다" onChange={(e) => setD({ path: e.target.value })} onKeyDown={onEnter} />
-          <button className={'primary' + (dirty ? ' dirty' : '')} onClick={apply} title={dirty ? '조건이 바뀌었습니다. 눌러서 적용하세요' : undefined}>
-            조회
-          </button>
+          <input className="path-input" value={draft.path} placeholder="파일/폴더 경로 (예: src/)" title="이 경로를 변경한 커밋만 조회합니다" {...textFilterEvents('path')} />
           <button onClick={resetFilters} title="조회 조건과 결과 내 필터를 초기화하고 전체 브랜치를 조회합니다">
             필터 초기화
           </button>
-          <button onClick={() => (reloadRefs(), runQuery(query))} title="현재 조건으로 다시 조회">
+          <button onClick={refresh} title="현재 조건으로 다시 조회">
             ⟳
           </button>
           <span className="spacer" />
@@ -327,9 +372,9 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
 
         <div className="toolbar-row">
           <span className="label">기간</span>
-          <input type="date" value={draft.since} onChange={(e) => setD({ since: e.target.value })} onKeyDown={onEnter} />
+          <input type="date" value={draft.since} onChange={(e) => setD({ since: e.target.value })} />
           <span>~</span>
-          <input type="date" value={draft.until} onChange={(e) => setD({ until: e.target.value })} onKeyDown={onEnter} />
+          <input type="date" value={draft.until} onChange={(e) => setD({ until: e.target.value })} />
           <button className="small-btn" onClick={() => setD({ since: dayOffset(0), until: '' })}>
             오늘
           </button>
@@ -343,7 +388,7 @@ export function ProjectView({ project, allProjects, settings, onSettings, jump, 
             전체 기간
           </button>
           <span className="label">작성자</span>
-          <input className="author-input" value={draft.author} placeholder="이름 또는 이메일" onChange={(e) => setD({ author: e.target.value })} onKeyDown={onEnter} />
+          <input className="author-input" value={draft.author} placeholder="이름 또는 이메일" {...textFilterEvents('author')} />
           <span className="spacer" />
           <span className="label">자동 새로고침</span>
           <select value={settings.autoRefreshSec} onChange={(e) => onSettings({ ...settings, autoRefreshSec: Number(e.target.value) })}>

@@ -3,29 +3,27 @@ import type { RefInfo } from '../lib/gitlab'
 
 interface Props {
   refs: RefInfo[]
-  /** 단일 모드에서는 [입력값] */
+  /** 단일 모드에서는 [확정한 값] */
   values: string[]
   /** true면 여러 개를 칩으로 선택한다 */
   multiple?: boolean
   placeholder?: string
   title?: string
   onChange: (values: string[]) => void
-  onEnter: () => void
 }
 
 // 브랜치/태그 입력 콤보박스.
 // 네이티브 <datalist>는 현재 입력값으로 항상 필터링해서, 값이 채워진 상태로 열면 그 항목만 보인다.
 // 여기서는 처음 열 때 전체 목록을 보여주고, 사용자가 타이핑을 시작한 뒤에만 필터링한다.
-export function RefCombo({ refs, values, multiple, placeholder, title, onChange, onEnter }: Props) {
+export function RefCombo({ refs, values, multiple, placeholder, title, onChange }: Props) {
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState(false)
   const [active, setActive] = useState(-1)
-  const [multiText, setMultiText] = useState('')
+  const [inputText, setInputText] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const text = multiple ? multiText : (values[0] ?? '')
-  const setText = (v: string) => (multiple ? setMultiText(v) : onChange([v]))
+  const text = inputText ?? (multiple ? '' : values[0] ?? '')
 
   // 기본 브랜치를 맨 위로
   const sorted = useMemo(() => [...refs].sort((a, b) => Number(!!b.isDefault) - Number(!!a.isDefault)), [refs])
@@ -45,19 +43,26 @@ export function RefCombo({ refs, values, multiple, placeholder, title, onChange,
 
   const toggle = (name: string) => onChange(values.includes(name) ? values.filter((v) => v !== name) : [...values, name])
 
+  const confirmSingle = (raw: string) => {
+    const value = raw.trim()
+    setInputText(null)
+    if (value !== (values[0] ?? '')) onChange([value])
+  }
+
   const pick = (r: RefInfo) => {
     if (!multiple) {
-      onChange([r.name])
+      confirmSingle(r.name)
       setOpen(false)
       return
     }
     // 여러 개를 연달아 고를 수 있도록 목록은 열어 둔다
     toggle(r.name)
-    setMultiText('')
+    setInputText(null)
     setTyped(false)
   }
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.nativeEvent.isComposing) return
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (!open) return show()
@@ -68,15 +73,15 @@ export function RefCombo({ refs, values, multiple, placeholder, title, onChange,
       else if (multiple && q) {
         // 목록에 없는 ref(커밋 SHA 등)도 직접 입력해 추가할 수 있다
         if (!values.includes(text.trim())) onChange([...values, text.trim()])
-        setMultiText('')
+        setInputText(null)
       } else {
         setOpen(false)
-        onEnter()
+        if (!multiple) confirmSingle(e.currentTarget.value)
       }
     } else if (e.key === 'Escape' && open) {
       e.stopPropagation()
       setOpen(false)
-    } else if (e.key === 'Backspace' && multiple && !multiText && values.length) {
+    } else if (e.key === 'Backspace' && multiple && !text && values.length) {
       onChange(values.slice(0, -1))
     }
   }
@@ -109,9 +114,12 @@ export function RefCombo({ refs, values, multiple, placeholder, title, onChange,
         title={title}
         onFocus={show}
         onMouseDown={show}
-        onBlur={() => setOpen(false)}
+        onBlur={(e) => {
+          setOpen(false)
+          if (!multiple && inputText !== null) confirmSingle(e.currentTarget.value)
+        }}
         onChange={(e) => {
-          setText(e.target.value)
+          setInputText(e.target.value)
           setOpen(true)
           setTyped(true)
           setActive(-1)
